@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm
+  template:
+    metadata:
+      labels:
+        app: vllm
+    spec:
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:v0.14.0
+          command: [ "vllm", "serve","Qwen/Qwen3-14B-FP8", "--data-parallel-size","4", "--structured-outputs-config.backend", "outlines" ]
+          envFrom:
+            - secretRef:
+                name: huggingface-personal-token
+          ports:
+            - containerPort: 8000
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+          resources:
+            requests:
+              cpu: "1"
+              memory: "2Gi"
+              nvidia.com/gpu: "4"
+            limits:
+              nvidia.com/gpu: "4"
+              memory: "256Gi"
+          env:
+            - name: LANG
+              value: 'C.UTF-8'
+            - name: VLLM_CONFIGURE_LOGGING
+              value: "1"
+      imagePullSecrets:
+        - name: private-registry-auth
+      nodeSelector:
+        gpu: h200
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory

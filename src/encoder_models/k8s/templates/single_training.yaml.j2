@@ -1,0 +1,70 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: encoder-outcome-prediction-{{ icd_version }}-{{ mimic_split }}
+  labels:
+    app: encoder-outcome-prediction
+spec:
+  template:
+    metadata:
+      labels:
+        app: encoder-outcome-prediction
+    spec:
+      containers:
+        - name: encoder-outcome-prediction
+          image: registry.datexis.com/tsteffek/encoderoutcomeprediction:{{ image_tag }}
+          command:
+            - "python"
+            - "classification_main.py"
+            - "fit"
+            - "--config=config.yaml"
+            - "--trainer.default_root_dir=/model-pvc/{{ icd_version }}-{{ mimic_split }}"
+            - "--data.data_dir=/data-pvc/data/mimic-iv/{{ icd_version }}/{{ mimic_split }}/"
+            - "--data.truncate_again={{ truncate_again }}"
+            - "--data.pretrained_model={{ model }}"
+          env:
+            - name: LANG
+              value: 'C.UTF-8'
+            - name: TOKENIZERS_PARALLELISM
+              value: 'true'
+            - name: NCCL_DEBUG
+              value: 'INFO'
+            - name: HF_HOME
+              value: "/model-pvc/huggingface_cache"
+            - name: WANDB_ENTITY
+              valueFrom:
+                secretKeyRef:
+                  name: wandb
+                  key: entity
+            - name: WANDB_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: wandb
+                  key: api_key
+          resources:
+            requests:
+              cpu: "1"
+            limits:
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: data-pvc
+              mountPath: /data-pvc
+            - name: model-pvc
+              mountPath: /model-pvc
+            - name: dshm
+              mountPath: /dev/shm
+      nodeSelector:
+        gpu: a100
+      volumes:
+        - name: data-pvc
+          persistentVolumeClaim:
+            claimName: {{ data_pvc }}
+        - name: model-pvc
+          persistentVolumeClaim:
+            claimName: {{ model_pvc }}
+        - name: dshm
+          emptyDir:
+            medium: Memory
+      imagePullSecrets:
+        - name: private-registry-auth
+      restartPolicy: Never
