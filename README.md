@@ -43,18 +43,22 @@ docker run --gpus all -it -v $(pwd):/clinibench clinibench:latest {script_name.p
 2. Request access to MIMIC-IV on [PhysioNet](https://physionet.org/content/mimiciv/2.2/)
 3. Download MIMIC-IV dataset (version 2.2)
 4. Download MIMIC-IV-Note dataset (version 2.2)
+5. Follow https://github.com/MIT-LCP/mimic-code/tree/main/mimic-iv/buildmimic/postgres for the general mimic-iv content
+6. Follow https://github.com/MIT-LCP/mimic-code/blob/main/mimic-iv-note/buildmimic/postgres/README.md for mimic-iv notes
 
-### Generating the admission notes
+### Generating the admission notes and dataset splits
+Adjust the PostgreSQL connection string (username, password, database name, hostname and port) in the `create_admission_note_dataset.sh` script and execute it.
+You may adjust the paths where the dataset is stored within the script. All following steps and default parameters assume the paths defined in the script. 
 
-### Generating the dataset splits
+This script will 1. create the admission from discharge notes dataset, 2. create the train/dev/test splits from the full 
+dataset and 3. create a file that contains the notes from all train splits which is used for few-shot experiments. 
 
 ## Usage
-### Zero-shot
 
 **Step 1: Start the vLLM server**
 Launch a vLLM server that provides access to your model. By default, the script assumes it's running on `localhost`. If your server is on a different host, you'll need to adjust the `--vllm_ip` parameter in Step 2.
 
-**Step 2: Generate diagnosis predictions**
+**Step 2a: Generate diagnosis predictions (zero-shot)**
 Run the prediction script with your model and data:
 ```bash
 python src/generative_models/predict_diagnoses.py \
@@ -63,6 +67,22 @@ python src/generative_models/predict_diagnoses.py \
    --icd10_code_file=data/icd10_codes.csv \
    --icd9_code_file=data/icd9_codes.csv \
    --results_file=qwen2.5-3B-mimic-iv-icu-icd10.parquet
+```
+
+**Step 2a: Generate diagnosis predictions (few-shot)**
+Run the prediction script including few-shot examples:
+```bash
+python src/generative_models/predict_diagnoses.py \
+    --vllm_ip=http://localhost:8000 \
+    --test_data=data/mimic-iv/icd-10/icu/test_10_icu.parquet \
+    --icd10_code_file=data/icd10_codes.csv \
+    --icd9_code_file=data/icd9_codes.csv \
+    --results_file=qwen2.5-3B-mimic-iv-icu-icd10.parquet \
+    --few_shot \
+    --few_shot_note_data=./data/fewshot-candidates/notes.parquet \
+    --few_shot_ids=./data/fewshot-candidates/gold_shots/test_few_shots.pq \
+    --few_shot_column=icd10_icu \
+    --num_few_shot_candidates=5
 ```
 
 **Step 3: Evaluate the predictions**
