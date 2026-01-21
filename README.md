@@ -71,7 +71,7 @@ python src/generative_models/predict_diagnoses.py \
    --results_file=qwen2.5-3B-mimic-iv-icu-icd10.parquet
 ```
 
-**Step 2a: Generate diagnosis predictions (few-shot)**
+**Step 2b: Generate diagnosis predictions (few-shot)**
 
 Run the prediction script including few-shot examples:
 ```bash
