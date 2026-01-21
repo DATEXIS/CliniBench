@@ -56,9 +56,11 @@ dataset and 3. create a file that contains the notes from all train splits which
 ## Usage
 
 **Step 1: Start the vLLM server**
+
 Launch a vLLM server that provides access to your model. By default, the script assumes it's running on `localhost`. If your server is on a different host, you'll need to adjust the `--vllm_ip` parameter in Step 2.
 
 **Step 2a: Generate diagnosis predictions (zero-shot)**
+
 Run the prediction script with your model and data:
 ```bash
 python src/generative_models/predict_diagnoses.py \
@@ -70,6 +72,7 @@ python src/generative_models/predict_diagnoses.py \
 ```
 
 **Step 2a: Generate diagnosis predictions (few-shot)**
+
 Run the prediction script including few-shot examples:
 ```bash
 python src/generative_models/predict_diagnoses.py \
@@ -86,6 +89,7 @@ python src/generative_models/predict_diagnoses.py \
 ```
 
 **Step 3: Evaluate the predictions**
+
 Map the generated diagnosis descriptions to ICD codes and calculate evaluation metrics:
 ```bash
 python src/generative_models/map_and_evaluate.py \
@@ -97,6 +101,7 @@ python src/generative_models/map_and_evaluate.py \
 ```
 
 **Step 4: View results**
+
 All evaluation metrics will be saved to the file specified in `--results_save_path` (e.g., `results.json`).
 ## Citation
 
