@@ -4,7 +4,7 @@
 ## Installation
 
 ### Prerequisites
-- Python 3.10
+- Python 3.11
 - CUDA-capable GPU (recommended for encoder training and LLM inference)
 - Access to MIMIC-IV dataset (requires PhysioNet credentialing)
 
