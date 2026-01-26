@@ -1,9 +1,11 @@
 import asyncio
+import json
 import logging
 import os
+import sys
 import time
 from argparse import ArgumentParser
-from typing import List
+from typing import List, Optional
 
 import aiohttp
 import httpx
@@ -12,7 +14,7 @@ import requests
 from openai import AsyncOpenAI
 from pydantic import BaseModel, conlist, constr
 from tqdm import tqdm
-from tqdm.asyncio import tqdm
+from tqdm.asyncio import tqdm, tqdm_asyncio
 
 from src.generative_models.map_and_evaluate import short_code_from_code
 
@@ -25,6 +27,94 @@ async def gather_with_concurrency(n, *coros):
             return await coro
 
     return await tqdm.gather(*(sem_coro(c) for c in coros))
+
+
+async def create_diagnoses_openai_client(prompts: List[str], system_prompt: str, labels, few_shots: Optional[List] = None):
+    os.makedirs(os.path.dirname(args.results_file), exist_ok=True)
+
+    # Create a custom httpx AsyncClient with higher limits
+    http_client = httpx.AsyncClient(
+        limits=httpx.Limits(
+            max_connections=5000,  # Total connection pool size
+            max_keepalive_connections=5000,  # Keepalive connections
+        ),
+        timeout=httpx.Timeout(6000.0),  # Optional: adjust timeout
+    )
+    client = AsyncOpenAI(
+        base_url=args.vllm_ip + "/v1",
+        api_key="-",
+        http_client=http_client,
+    )
+    models = await client.models.list()
+    model = models.data[0].id
+    completions = []
+
+    if os.getenv("DEBUG") == "1":
+        prompts = prompts[:512]
+        labels = labels[:512]
+
+    # warmup request to not run the vllm instance OOM (helps to cache the compiled schema)
+    warmups = []
+    for i in range(3):
+        warmups.append(client.chat.completions.create(
+            model=model,
+            temperature=0,
+            max_tokens=1500,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": f"The admission note looks as follows: 1234",
+                },
+            ],
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "diagnosis-list",
+                    "schema": DiagnosisListRestrictedStr.model_json_schema(),
+                },
+            },
+        ))
+    await asyncio.gather(*warmups)
+
+    for i, note in enumerate(prompts):
+        completions.append(
+            client.chat.completions.create(
+                model=model,
+                temperature=0,
+                max_tokens=1500,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {
+                        "role": "user",
+                        "content": f"The admission note looks as follows: {note}" if few_shots is None else f"The admission note looks as follows: {note} \n\n Similar patient notes look as follows: {few_shots[i].json()} \n\n Please specifiy the diagnoses for the given admission note following the style of diagnosis descriptions in the provided examples." ,
+                    },
+                ],
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "diagnosis-list",
+                        "schema": DiagnosisListRestrictedStr.model_json_schema(),
+                    },
+                }
+            )
+        )
+    #resps = await asyncio.gather(*completions)
+    resps = await gather_with_concurrency(5000, *completions)
+    completions = [json.loads(x.choices[0].message.content)["diagnoses"] for x in resps]
+
+    df = pd.DataFrame(
+        {
+            "results": completions,
+            "prompts": prompts,
+            "labels": labels,
+            "icd_version": args.icd_version,
+        },
+        index=None,
+    )
+    df.to_parquet(args.results_file)
+
+
 
 
 async def generate_diagnoses_apiserver(prompts):
@@ -323,26 +413,33 @@ def main():
     cases = []
     labels = []
     few_shots = []
+    notes = notes.dropna()
     for i, note in notes.iterrows():
         cases.append(note["TEXT"])
         if args.few_shot:
             few_shots.append(few_shot_candidates[str(note.name)])
-        labels.append([short_code_from_code(x) for x in note["LONG_CODES"].tolist()])
+        labels.append([short_code_from_code(x) for x in note["LONG_CODES"].tolist() if not pd.isna(note.TEXT)])
     prompts = []
 
     schema = str(DiagnosisListRestrictedStr.model_json_schema())
+    SYSTEM_PROMPT = f"You are a medical professional. Given an admission note for a patient, present a list of possible diagnoses for the patient. Answer in the following schema: {schema}."
 
-    if args.few_shot:
-        for i, note in enumerate(cases):
-            task_prompt = f"You are a medical professional. Given an admission note for a patient, present a list of possible diagnoses for the patient. Similar patients look like this: {few_shots[i].json()}. The admission note is as follows: {note}. Give the diagnoses following the schema from the examples. Answer in the following schema: {schema} "
-            prompts.append(task_prompt)
+    if args.instruct:
+        if args.few_shot:
+            asyncio.run(create_diagnoses_openai_client(cases, SYSTEM_PROMPT, labels))
+        else:
+            asyncio.run(create_diagnoses_openai_client(cases, SYSTEM_PROMPT, labels, few_shots=few_shots))
     else:
-        for note in cases:
-            task_prompt = f"You are a medical professional. Given an admission note for a patient, present a list of possible diagnoses for the patient. The admission note is as follows: {note}. Answer in the following schema: {schema} "
-            prompts.append(task_prompt)
-    logger.info("Prompts prepared")
-
-    asyncio.run(evaluate_cases(prompts, labels))
+        if args.few_shot:
+            for i, note in enumerate(cases):
+                task_prompt = f"You are a medical professional. Given an admission note for a patient, present a list of possible diagnoses for the patient. Similar patients look like this: {few_shots[i].json()}. The admission note is as follows: {note}. Give the diagnoses following the schema from the examples. Answer in the following schema: {schema} "
+                prompts.append(task_prompt)
+        else:
+            for note in cases:
+                task_prompt = f"You are a medical professional. Given an admission note for a patient, present a list of possible diagnoses for the patient. The admission note is as follows: {note}. Answer in the following schema: {schema} "
+                prompts.append(task_prompt)
+        logger.info("Prompts prepared")
+        asyncio.run(evaluate_cases(prompts, labels))
 
 
 if __name__ == "__main__":
@@ -421,6 +518,13 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
+        "--instruct",
+        action="store_true",
+        default=False,
+        help="Indicate whether the model is an instruction tuned model (set the flag if the model was instruction tuned otherwise we assume the model is only a completion language model)",
+    )
+
+    parser.add_argument(
         "--few_shot",
         default=False,
         action="store_true",
@@ -456,7 +560,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     logger = logging.getLogger(__name__)
-    logging.basicConfig(filename=args.logfile, encoding="utf-8", level=logging.DEBUG)
+    logging.basicConfig(encoding="utf-8", level=logging.INFO)
+
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setLevel(logging.DEBUG)
+    logger.addHandler(handler)
 
     class DiagnosisListNormalStr(BaseModel):
         diagnoses: conlist(
