@@ -147,9 +147,6 @@ def partition_label_space(runs: list[dict]) -> set[str]:
 
 
 # ── tables ───────────────────────────────────────────────────────────────────
-# Main comparison: F1 (micro and macro), ranking quality and main diagnosis.
-MAIN_COLUMNS = {"micro_f1": "Micro F1", "macro_f1": "Macro F1", "map@20": "MAP@20",
-                "md_acc": "MD Acc."}
 ALL_COLUMNS = {"micro_recall": "Micro Rec.", "micro_precision": "Micro Prec.",
                "micro_f1": "Micro F1", "macro_recall": "Macro Rec.",
                "macro_precision": "Macro Prec.", "macro_f1": "Macro F1",
@@ -200,53 +197,80 @@ def setting_label(row) -> str:
     return f"{row['shots']}-shot {row['retriever']}"
 
 
+UNITS = ("hosp", "icu")
+F1_COLUMNS = {"micro_f1": "Micro F1", "macro_f1": "Macro F1"}
+LLM_SETTINGS = {
+    "Zero-shot": lambda d: (d["shots"] == 0) & (d["prompting"] == "zero-shot"),
+    "CoT": lambda d: d["prompting"] == "zero-shot CoT",
+    "5-shot BM25": lambda d: (d["shots"] == 5) & (d["retriever"] == "BM25"),
+}
+
+
+def grid_markdown(df: pd.DataFrame, row: str, specs: list[tuple], bold_best: bool = False) -> str:
+    """One line per value of ``row`` (in frame order); ``specs`` = [(header, mask_fn, metric)]."""
+    labels = list(dict.fromkeys(df[row]))
+    columns = []
+    for header, mask, metric in specs:
+        values = df[mask(df)].set_index(row)[metric]
+        if values.index.duplicated().any():
+            raise AssertionError(f"column {header!r} has several values per {row}")
+        columns.append((header, values))
+    lines = ["| " + " | ".join([row] + [h for h, _ in columns]) + " |",
+             "|:---|" + "---:|" * len(columns)]
+    for label in labels:
+        cells = []
+        for _, values in columns:
+            v = values.get(label, float("nan"))
+            cell = "–" if v != v else f"{v:.2f}"
+            if bold_best and v == values.max():
+                cell = f"**{cell}**"
+            cells.append(cell)
+        lines.append(f"| {label} | " + " | ".join(cells) + " |")
+    return "\n".join(lines)
+
+
+def unit_mask(unit: str, extra=None):
+    return lambda d: (d["unit"] == unit) & (extra(d) if extra else True)
+
+
 def main_tables(agg: pd.DataFrame) -> str:
-    """README main table per care unit: encoders, then LLMs zero-shot / CoT / 5-shot BM25."""
-    settings = [("zero-shot", lambda d: (d["shots"] == 0) & (d["prompting"] == "zero-shot")),
-                ("zero-shot CoT", lambda d: d["prompting"] == "zero-shot CoT"),
-                ("5-shot BM25", lambda d: (d["shots"] == 5) & (d["retriever"] == "BM25"))]
-    parts = []
-    for unit in ("hosp", "icu"):
-        sub = agg[agg["unit"] == unit]
-        enc = sub[(sub["family"] == "encoder") & (sub["prompting"] == "untuned")
-                  & (sub["budget"] == "top-20")].copy()
-        enc["Setting"] = "fine-tuned"
-        blocks = [enc]
-        for title, mask in settings:
-            gen = sub[(sub["family"] == "generative") & mask(sub)].copy()
-            gen["Setting"] = title
-            blocks.append(gen)
-        table = pd.concat(blocks)
-        parts.append(f"**{unit.upper()}**\n\n" + to_markdown(table, ["Model", "Setting"],
-                                                               MAIN_COLUMNS))
+    """Compact README comparison: micro and macro F1, HOSP and ICU side by side."""
+    enc = agg[(agg["family"] == "encoder") & (agg["prompting"] == "untuned")
+              & (agg["budget"] == "top-20")]
+    enc_specs = [(f"{u.upper()} {name}", unit_mask(u), m)
+                 for u in UNITS for m, name in F1_COLUMNS.items()]
+    parts = ["**Encoders** (fine-tuned, top 20 by score)\n\n"
+             + grid_markdown(enc, "Model", enc_specs, bold_best=True)]
+    gen = agg[agg["family"] == "generative"]
+    for metric, name in F1_COLUMNS.items():
+        specs = [(f"{u.upper()} {label}", unit_mask(u, mask), metric)
+                 for u in UNITS for label, mask in LLM_SETTINGS.items()]
+        parts.append(f"**Generative LLMs: {name}**\n\n"
+                     + grid_markdown(gen, "Model", specs, bold_best=True))
     return "\n\n".join(parts)
 
 
 def threshold_table(agg: pd.DataFrame) -> str:
     """Encoders at both operating points: the shared top-20 budget and their own thresholds."""
-    columns = {"avg_predicted_codes": "Codes/note"} | MAIN_COLUMNS
-    parts = []
-    for unit in ("hosp", "icu"):
-        enc = agg[(agg["unit"] == unit) & (agg["family"] == "encoder")].copy()
-        enc["Setting"] = enc.apply(setting_label, axis=1)
-        enc["s"] = enc["Setting"].map(list(ENCODER_SETTINGS.values()).index)
-        enc = enc.sort_values(["order", "s"])
-        parts.append(f"**{unit.upper()}**\n\n" + to_markdown(enc, ["Model", "Setting"], columns))
-    return "\n\n".join(parts)
+    enc = agg[agg["family"] == "encoder"].copy()
+    enc["s"] = enc.apply(lambda r: list(ENCODER_SETTINGS).index((r["prompting"], r["budget"])), axis=1)
+    enc = enc.sort_values(["order", "s"])
+    enc["Encoder, setting"] = enc["Model"] + ", " + enc.apply(setting_label, axis=1)
+    specs = [(f"{u.upper()} {name}", unit_mask(u), m) for u in UNITS
+             for m, name in ({"avg_predicted_codes": "Codes/note"} | F1_COLUMNS).items()]
+    return grid_markdown(enc, "Encoder, setting", specs)
 
 
 def retriever_table(agg: pd.DataFrame, model: str = "Qwen2-72B-Instruct") -> str:
     """Counterpart of the paper's Tables 3 and 10."""
-    parts = []
-    for unit in ("hosp", "icu"):
-        sub = agg[(agg["unit"] == unit) & (agg["model"] == model)
-                  & agg["prompting"].isin(["zero-shot", "few-shot"])].copy()
-        sub["Retriever"] = sub["retriever"].replace("", "Zero-shot")
-        sub["order"] = sub["Retriever"].map((["Zero-shot"] + RETRIEVER_ORDER).index)
-        sub = sub.sort_values(["order", "shots"]).rename(columns={"shots": "#FS"})
-        parts.append(f"**{unit.upper()}: {MODEL_NAMES[model]}, few-shot retrievers**\n\n"
-                     + to_markdown(sub, ["Retriever", "#FS"], MAIN_COLUMNS))
-    return "\n\n".join(parts)
+    sub = agg[(agg["model"] == model) & agg["prompting"].isin(["zero-shot", "few-shot"])].copy()
+    sub["o"] = sub["retriever"].map(([""] + RETRIEVER_ORDER).index)
+    sub = sub.sort_values(["o", "shots"])
+    sub["Demonstrations"] = sub.apply(
+        lambda r: "none (zero-shot)" if r["shots"] == 0 else f"{r['retriever']}, {r['shots']}-shot", axis=1)
+    specs = [(f"{u.upper()} {name}", unit_mask(u), m)
+             for u in UNITS for m, name in F1_COLUMNS.items()]
+    return grid_markdown(sub, "Demonstrations", specs)
 
 
 def all_runs_table(agg: pd.DataFrame) -> str:
@@ -293,7 +317,8 @@ def main() -> None:
               args.exclude)
     else:
         agg = aggregated(args.metrics_csv)
-        print(main_tables(agg) + "\n\n" + threshold_table(agg) + "\n\n" + retriever_table(agg))
+        print("\n\n<!-- next table -->\n\n".join(
+            [main_tables(agg), threshold_table(agg), retriever_table(agg)]))
         args.all_runs_md.write_text(
             "# CliniBench: all runs (unified evaluation)\n\n"
             "Micro- and macro-averaged over the shared label space, top-20 predictions, "
