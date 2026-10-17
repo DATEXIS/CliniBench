@@ -3,7 +3,11 @@
 Inputs (all positionally aligned, one row per test note with gold codes):
 
 * Encoder dumps ``Encoder_<model>_<tuned|untuned>_<icu|hosp>-icd-<9|10>.json``
-  with ``predicted_codes@20`` (score-ranked) and ``annotated_codes``.
+  with ``predicted_codes@20`` (score-ranked), ``predicted_codes`` (every label
+  above its threshold: 0.5 untuned, per-class validation thresholds tuned) and
+  ``annotated_codes``. Each dump is scored twice: ``budget=top-20`` (the paper's
+  protocol, shared with the LLMs) and ``budget=threshold`` (the encoder's own
+  operating point; no MAP because the set is unranked).
 * Generative runs ``<model>-<icu|hosp>-icd-<9|10>-<setting>.{json,parquet}``
   as written by ``map_and_evaluate.py --save_mapped_results`` with
   ``predicted_codes`` (generation order) and ``annotated_codes``. A boolean
@@ -71,12 +75,13 @@ def describe_setting(family: str, setting: str) -> dict:
 
 
 # ── loading ──────────────────────────────────────────────────────────────────
-def load_run(run: dict) -> tuple[list[list[str]], list[list[str]]]:
-    """Ranked short-code predictions and short-code gold, rows with gold only."""
+def load_run(run: dict, budget: str = "top-20") -> tuple[list[list[str]], list[list[str]]]:
+    """Short-code predictions and short-code gold, rows with gold only."""
     path, icd = run["path"], run["icd"]
     if run["family"] == "encoder":
         payload = json.loads(path.read_text())
-        raw_preds, raw_gold = payload["predicted_codes@20"], payload["annotated_codes"]
+        key = "predicted_codes@20" if budget == "top-20" else "predicted_codes"
+        raw_preds, raw_gold = payload[key], payload["annotated_codes"]
     elif path.suffix == ".json":
         payload = json.loads(path.read_text())
         raw_preds, raw_gold = payload["predicted_codes"], payload["annotated_codes"]
@@ -92,7 +97,8 @@ def load_run(run: dict) -> tuple[list[list[str]], list[list[str]]]:
     if len(raw_preds) != len(raw_gold):
         raise AssertionError(f"{path.name}: {len(raw_preds)} predictions vs {len(raw_gold)} gold rows")
     golds = [gold_short_codes(g, icd) for g in raw_gold]
-    preds = [ranked_short_codes(p or [], icd, TOP_N) for p in raw_preds]
+    top_n = TOP_N if budget == "top-20" else None
+    preds = [ranked_short_codes(p or [], icd, top_n) for p in raw_preds]
     keep = [i for i, g in enumerate(golds) if g]
     return [preds[i] for i in keep], [golds[i] for i in keep]
 
@@ -105,29 +111,32 @@ def score(results_dir: Path, out_csv: Path, skip_existing: bool,
     runs = discover_runs(results_dir, exclude)
     done = set()
     if skip_existing and out_csv.exists():
-        done = set(pd.read_csv(out_csv)["file"])
+        done = set(pd.read_csv(out_csv)[["file", "budget"]].itertuples(index=False, name=None))
     out_csv.parent.mkdir(parents=True, exist_ok=True)
 
     for unit_icd, group in pd.DataFrame(runs).groupby(["unit", "icd"]):
         label_space = partition_label_space(group.to_dict("records"))
         for run in group.to_dict("records"):
-            if run["path"].name in done:
-                continue
-            if time_budget_s and time.time() - started > time_budget_s:
-                print("time budget reached, rerun with --skip_existing to continue")
-                return
-            preds, golds = load_run(run)
-            check_shared_label_space({run["path"].name: {c for g in golds for c in g},
-                                      "partition": label_space})
-            row = {k: run[k] for k in ("family", "model", "setting", "prompting", "shots",
-                                       "retriever", "unit", "icd")}
-            row["file"] = run["path"].name
-            row |= evaluate(preds, golds, label_space, TOP_N)
-            pd.DataFrame([row]).to_csv(out_csv, mode="a", index=False,
-                                       header=not out_csv.exists())
-            print(f"{row['file']}: R {row['macro_recall']:.2f} P {row['macro_precision']:.2f} "
-                  f"F1 {row['macro_f1']:.2f} MAP {row[f'map@{TOP_N}']:.2f} MD {row['md_acc']:.2f}",
-                  flush=True)
+            budgets = ["top-20", "threshold"] if run["family"] == "encoder" else ["top-20"]
+            for budget in budgets:
+                if (run["path"].name, budget) in done:
+                    continue
+                if time_budget_s and time.time() - started > time_budget_s:
+                    print("time budget reached, rerun with --skip_existing to continue")
+                    return
+                preds, golds = load_run(run, budget)
+                check_shared_label_space({run["path"].name: {c for g in golds for c in g},
+                                          "partition": label_space})
+                row = {k: run[k] for k in ("family", "model", "setting", "prompting",
+                                           "shots", "retriever", "unit", "icd")}
+                row |= {"budget": budget, "file": run["path"].name}
+                row |= evaluate(preds, golds, label_space,
+                                TOP_N if budget == "top-20" else None)
+                pd.DataFrame([row]).to_csv(out_csv, mode="a", index=False,
+                                           header=not out_csv.exists())
+                print(f"{row['file']} [{budget}]: microF1 {row['micro_f1']:.2f} "
+                      f"macroF1 {row['macro_f1']:.2f} MAP {row[f'map@{TOP_N}']:.2f} "
+                      f"MD {row['md_acc']:.2f}", flush=True)
 
 
 def partition_label_space(runs: list[dict]) -> set[str]:
@@ -151,7 +160,8 @@ def mean_over_icd(df: pd.DataFrame, keys: list[str]) -> pd.DataFrame:
     counts = df.groupby(keys)["icd"].nunique()
     if (counts != 2).any():
         raise AssertionError(f"missing ICD-9 or ICD-10 run for {counts[counts != 2].index.tolist()}")
-    return df.groupby(keys, sort=False)[list(ALL_COLUMNS)].mean().reset_index()
+    columns = list(ALL_COLUMNS) + ["avg_predicted_codes"]
+    return df.groupby(keys, sort=False)[columns].mean().reset_index()
 
 
 MODEL_NAMES = {
@@ -163,13 +173,17 @@ MODEL_NAMES = {
     "Qwen2-7B": "Qwen2-7B", "Qwen2-7B-Instruct": "Qwen2-7B-Instruct",
     "Qwen2-72B": "Qwen2-72B", "Qwen2-72B-Instruct": "Qwen2-72B-Instruct",
 }
+ENCODER_SETTINGS = {("untuned", "top-20"): "top-20, raw scores",
+                    ("threshold-tuned", "top-20"): "top-20, tuned scores",
+                    ("untuned", "threshold"): "threshold 0.5",
+                    ("threshold-tuned", "threshold"): "tuned thresholds"}
 RETRIEVER_ORDER = ["Random", "BM25", "PubMedBERT-NeuML", "BioMedBERT-ft", "Gold heuristic"]
 
 
 def aggregated(metrics_csv: Path) -> pd.DataFrame:
     """Unweighted mean over ICD-9 and ICD-10, as in the paper."""
     df = pd.read_csv(metrics_csv).fillna({"retriever": ""})
-    keys = ["unit", "family", "model", "prompting", "shots", "retriever"]
+    keys = ["unit", "family", "model", "prompting", "shots", "retriever", "budget"]
     agg = mean_over_icd(df, keys)
     agg["Model"] = agg["model"].map(MODEL_NAMES)
     if agg["Model"].isna().any():
@@ -180,7 +194,7 @@ def aggregated(metrics_csv: Path) -> pd.DataFrame:
 
 def setting_label(row) -> str:
     if row["family"] == "encoder":
-        return row["prompting"]
+        return ENCODER_SETTINGS[(row["prompting"], row["budget"])]
     if row["shots"] == 0:
         return row["prompting"]
     return f"{row['shots']}-shot {row['retriever']}"
@@ -194,9 +208,9 @@ def main_tables(agg: pd.DataFrame) -> str:
     parts = []
     for unit in ("hosp", "icu"):
         sub = agg[agg["unit"] == unit]
-        enc = sub[sub["family"] == "encoder"].sort_values(
-            ["order", "prompting"], ascending=[True, False]).copy()
-        enc["Setting"] = enc["prompting"]
+        enc = sub[(sub["family"] == "encoder") & (sub["prompting"] == "untuned")
+                  & (sub["budget"] == "top-20")].copy()
+        enc["Setting"] = "fine-tuned"
         blocks = [enc]
         for title, mask in settings:
             gen = sub[(sub["family"] == "generative") & mask(sub)].copy()
@@ -205,6 +219,19 @@ def main_tables(agg: pd.DataFrame) -> str:
         table = pd.concat(blocks)
         parts.append(f"**{unit.upper()}**\n\n" + to_markdown(table, ["Model", "Setting"],
                                                                MAIN_COLUMNS))
+    return "\n\n".join(parts)
+
+
+def threshold_table(agg: pd.DataFrame) -> str:
+    """Encoders at both operating points: the shared top-20 budget and their own thresholds."""
+    columns = {"avg_predicted_codes": "Codes/note"} | MAIN_COLUMNS
+    parts = []
+    for unit in ("hosp", "icu"):
+        enc = agg[(agg["unit"] == unit) & (agg["family"] == "encoder")].copy()
+        enc["Setting"] = enc.apply(setting_label, axis=1)
+        enc["s"] = enc["Setting"].map(list(ENCODER_SETTINGS.values()).index)
+        enc = enc.sort_values(["order", "s"])
+        parts.append(f"**{unit.upper()}**\n\n" + to_markdown(enc, ["Model", "Setting"], columns))
     return "\n\n".join(parts)
 
 
@@ -228,9 +255,11 @@ def all_runs_table(agg: pd.DataFrame) -> str:
         sub = agg[agg["unit"] == unit].copy()
         sub["Setting"] = sub.apply(setting_label, axis=1)
         sub["r"] = sub["retriever"].map(lambda r: ([""] + RETRIEVER_ORDER).index(r))
-        sub = sub.sort_values(["family", "order", "r", "shots", "prompting"])
-        parts.append(f"## {unit.upper()}\n\n" + to_markdown(sub, ["Model", "Setting"],
-                                                             ALL_COLUMNS))
+        sub["s"] = sub.apply(lambda r: list(ENCODER_SETTINGS).index((r["prompting"], r["budget"]))
+                             if r["family"] == "encoder" else 0, axis=1)
+        sub = sub.sort_values(["family", "order", "s", "r", "shots", "prompting"])
+        parts.append(f"## {unit.upper()}\n\n" + to_markdown(
+            sub, ["Model", "Setting"], ALL_COLUMNS | {"avg_predicted_codes": "Codes/note"}))
     return "\n\n".join(parts)
 
 
@@ -239,8 +268,9 @@ def to_markdown(df: pd.DataFrame, keys: list[str], columns: dict[str, str]) -> s
     lines = ["| " + " | ".join(map(str, out.columns)) + " |",
              "|" + "|".join([":---"] * len(keys) + ["---:"] * len(columns)) + "|"]
     for _, row in out.iterrows():
-        lines.append("| " + " | ".join(f"{v:.2f}" if isinstance(v, float) else str(v)
-                                       for v in row) + " |")
+        lines.append("| " + " | ".join(
+            ("–" if v != v else f"{v:.2f}") if isinstance(v, float) else str(v)
+            for v in row) + " |")
     return "\n".join(lines)
 
 
@@ -263,7 +293,7 @@ def main() -> None:
               args.exclude)
     else:
         agg = aggregated(args.metrics_csv)
-        print(main_tables(agg) + "\n\n" + retriever_table(agg))
+        print(main_tables(agg) + "\n\n" + threshold_table(agg) + "\n\n" + retriever_table(agg))
         args.all_runs_md.write_text(
             "# CliniBench: all runs (unified evaluation)\n\n"
             "Micro- and macro-averaged over the shared label space, top-20 predictions, "

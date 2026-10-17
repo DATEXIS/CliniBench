@@ -20,7 +20,8 @@ Protocol (identical for every system, per data partition):
   undefined, then the unweighted mean. F1 is the mean of per-class F1.
 * Micro recall / precision / F1: pooled over all (note, code) pairs.
 * MAP@n: per-note average precision over the top-n list, normalised by
-  ``min(|gold|, n)``, averaged over notes.
+  ``min(|gold|, n)``, averaged over notes. Undefined (NaN) for unranked
+  prediction sets (``top_n=None``, e.g. encoder threshold outputs).
 * MD Acc: share of notes whose main diagnosis is in the top-n list.
 """
 from __future__ import annotations
@@ -54,7 +55,8 @@ def gold_short_codes(codes: Iterable[str], icd_version: int) -> list[str]:
 
 
 def ranked_short_codes(codes: Iterable[str], icd_version: int,
-                       top_n: int = TOP_N) -> list[str]:
+                       top_n: int | None = TOP_N) -> list[str]:
+    """``top_n=None`` keeps every code (unranked threshold outputs)."""
     return dedup(short_code(c, icd_version) for c in codes if str(c).strip())[:top_n]
 
 
@@ -80,8 +82,8 @@ def average_precision_at_n(pred: Sequence[str], gold: set[str], top_n: int) -> f
 
 
 def evaluate(preds: Sequence[Sequence[str]], golds: Sequence[Sequence[str]],
-             label_space: set[str], top_n: int = TOP_N) -> dict[str, float]:
-    """Score ranked short-code lists against short-code gold lists."""
+             label_space: set[str], top_n: int | None = TOP_N) -> dict[str, float]:
+    """Score ranked short-code lists (or unranked sets, ``top_n=None``) against gold."""
     if len(preds) != len(golds):
         raise AssertionError(f"{len(preds)} predictions vs {len(golds)} gold rows")
     if any(not g for g in golds):
@@ -112,7 +114,8 @@ def evaluate(preds: Sequence[Sequence[str]], golds: Sequence[Sequence[str]],
         micro_tp += len(pred_set & gold_set)
         micro_fp += len(pred_set - gold_set)
         micro_fn += len(gold_set - pred_set)
-        aps.append(average_precision_at_n(pred, gold_set, top_n))
+        if top_n is not None:
+            aps.append(average_precision_at_n(pred, gold_set, top_n))
         main_hits += gold[0] in pred_set
         n_pred += len(pred_set)
 
@@ -132,7 +135,7 @@ def evaluate(preds: Sequence[Sequence[str]], golds: Sequence[Sequence[str]],
         "micro_recall": 100 * micro_r,
         "micro_precision": 100 * micro_p,
         "micro_f1": 100 * micro_f1,
-        f"map@{top_n}": 100 * float(np.mean(aps)),
+        f"map@{TOP_N}": 100 * float(np.mean(aps)) if top_n is not None else float("nan"),
         "md_acc": 100 * main_hits / n,
         "avg_predicted_codes": n_pred / n,
         "avg_gold_codes": float(np.mean([len(set(g)) for g in golds])),
