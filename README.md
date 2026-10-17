@@ -133,7 +133,7 @@ The same rules apply to every system and data partition (`src/evaluation/unified
 * **Label space.** The short codes of the test gold. CliniBench keeps only codes that occur in the train, validation and test split, and this filtered label space is used for encoders and LLMs alike: 917 / 1,177 classes (HOSP ICD-9 / ICD-10) and 777 / 849 classes (ICU). The LLM text-to-code index is restricted to codes in this label space. The evaluator checks that every run of a partition uses the identical label space.
 * **Notes.** All test notes with at least one gold code (HOSP 36,003 / 19,779, ICU 8,157 / 5,493).
 * **Predictions.** The top 20 codes, truncated to short codes and de-duplicated by first occurrence. Encoders rank by score, LLMs by generation order. LLM lists can be shorter than 20 after de-duplication. Encoders are additionally scored at their own decision thresholds, without the top-20 cut ([see below](#encoders-at-their-own-operating-point)).
-* **Metrics.** The README tables report micro and macro F1. `results/all_runs.md` adds MAP@20, MD Acc. and micro/macro recall and precision for every run.
+* **Metrics.** The main tables report micro F1, macro F1 and MAP@20. `results/all_runs.md` adds MD Acc. and micro/macro recall and precision for every run.
   * Micro scores pool true positives, false positives and false negatives over all (note, code) pairs.
   * Macro scores are computed per class over the label space (0 when undefined) and averaged with equal class weights. Macro F1 is the mean of per-class F1.
   * MAP@20 is the per-note average precision normalised by min(|gold|, 20).
@@ -149,7 +149,7 @@ The same rules apply to every system and data partition (`src/evaluation/unified
 * **The MAP gap is larger than reported.** It grows once both families are ranked the same way (HOSP 58.84 vs. 31.26, ICU 52.54 vs. 25.30).
 * **ICU macro recall:** the best zero-shot LLM (Qwen2-72B-Instruct, 24.11) is now slightly above the best encoder (GatorTronS, 23.71; printed as 28.61).
 * **Threshold tuning depends on the protocol.** Within the top-20 budget, tuned scores lower micro F1, macro F1, MAP, recall and MD accuracy for all three encoders and raise only macro precision. Used as a classifier, the tuned thresholds give every encoder its best macro F1 (GatorTronS: HOSP 28.28, ICU 23.62). They do so by predicting many more codes (32–90 per note), which halves micro F1. The 0.5 threshold does the opposite. It predicts few codes (5–9 per note) and has low macro F1, but it gives BioMedBERT and GatorTronS their highest micro F1 (GatorTronS: HOSP 56.09, ICU 51.45).
-* **Prompting:** 5 BM25 demonstrations raise micro F1 and MAP for all 12 LLMs in both units. CoT improves macro F1 for only 1 and micro F1 for only 2 of 12 models in each unit.
+* **Prompting:** 5 BM25 demonstrations raise micro F1 and MAP for all 12 LLMs in both units. Zero-shot CoT (in `results/all_runs.md`) improves macro F1 for only 1 and micro F1 for only 2 of 12 models in each unit.
 
 ### Reproducing
 
@@ -166,49 +166,51 @@ Per-partition scores for all 840 runs are in [`results/unified_metrics.csv`](res
 
 ### Main results
 
-Top-20 predictions; unweighted mean of the ICD-9 and ICD-10 partitions of each care unit, as in the paper. Micro F1 pools all (note, code) decisions and is dominated by frequent codes. Macro F1 weights every class equally and is dominated by the long tail. Bold marks the best value per column. MAP@20, MD Acc. and micro/macro recall and precision for every run are in [`results/all_runs.md`](results/all_runs.md).
+Counterpart of Tables 2 and 11. All values use the top-20 predictions and are the unweighted mean of the ICD-9 and ICD-10 partitions of each care unit, as in the paper. Encoders are fine-tuned, rank labels by raw score and use no demonstrations, so they appear in the zero-shot columns. Micro F1 pools all (note, code) decisions and is dominated by frequent codes. Macro F1 weights every class equally and is dominated by the long tail. **Bold**: best per column; <ins>underlined</ins>: best generative LLM where it is not the best overall. Zero-shot CoT, MD Acc. and micro/macro recall and precision for every run are in [`results/all_runs.md`](results/all_runs.md).
 
-**Encoders** (fine-tuned, top 20 by score)
+**HOSP**
 
-| Model | HOSP Micro F1 | HOSP Macro F1 | ICU Micro F1 | ICU Macro F1 |
-|:---|---:|---:|---:|---:|
-| BioMedBERT-110M | 45.83 | 22.00 | 47.33 | 17.11 |
-| GatorTronS-345M | **48.03** | **25.77** | **50.06** | **21.49** |
-| M2-BERT-80M | 38.72 | 9.49 | 38.54 | 8.14 |
-
-**Generative LLMs: Micro F1**
-
-| Model | HOSP Zero-shot | HOSP CoT | HOSP 5-shot BM25 | ICU Zero-shot | ICU CoT | ICU 5-shot BM25 |
+| Model | Zero-shot Micro F1 | Zero-shot Macro F1 | Zero-shot MAP@20 | 5-shot BM25 Micro F1 | 5-shot BM25 Macro F1 | 5-shot BM25 MAP@20 |
 |:---|---:|---:|---:|---:|---:|---:|
-| Llama 3.1-8B | 22.10 | 19.12 | 35.01 | 20.87 | 18.68 | 29.91 |
-| Llama 3.1-8B-Instruct | 24.71 | 20.80 | 32.18 | 25.81 | 22.65 | 29.27 |
-| Llama 3.1-70B | 19.44 | 22.20 | 32.14 | 19.69 | 22.52 | 28.64 |
-| Llama 3.1-70B-Instruct | 22.04 | 22.46 | 32.76 | 24.59 | 25.53 | 30.08 |
-| Mistral-7B | 15.60 | 0.37 | 31.14 | 13.99 | 1.48 | 26.07 |
-| Mistral-7B-Instruct | 25.06 | 22.39 | 32.88 | 26.55 | 24.41 | 31.08 |
-| Mistral-Nemo-13B | 21.46 | 15.59 | 31.06 | 20.22 | 15.66 | 26.18 |
-| Mistral-Nemo-13B-Instruct | 20.84 | 18.68 | 32.52 | 23.08 | 20.97 | 26.44 |
-| Qwen2-7B | 26.09 | 25.42 | 31.01 | 25.33 | 24.64 | 26.43 |
-| Qwen2-7B-Instruct | 27.28 | 25.82 | 32.04 | 27.73 | 26.99 | 30.22 |
-| Qwen2-72B | 26.96 | 25.40 | 33.84 | 26.84 | 25.46 | 30.07 |
-| Qwen2-72B-Instruct | **28.53** | **27.45** | **35.64** | **29.50** | **28.76** | **32.21** |
+| *Encoders* | | | | | | |
+| BioMedBERT-110M | 45.83 | 22.00 | 54.99 | – | – | – |
+| GatorTronS-345M | **48.03** | **25.77** | **58.84** | – | – | – |
+| M2-BERT-80M | 38.72 | 9.49 | 41.67 | – | – | – |
+| *Generative LLMs* | | | | | | |
+| Llama 3.1-8B | 22.10 | 11.06 | 14.69 | 35.01 | 17.22 | 27.15 |
+| Llama 3.1-8B-Instruct | 24.71 | 11.61 | 17.89 | 32.18 | 15.44 | 23.92 |
+| Llama 3.1-70B | 19.44 | 9.66 | 14.99 | 32.14 | 15.09 | 26.18 |
+| Llama 3.1-70B-Instruct | 22.04 | 11.33 | 15.15 | 32.76 | 15.81 | 26.05 |
+| Mistral-7B | 15.60 | 8.50 | 9.67 | 31.14 | 15.29 | 23.64 |
+| Mistral-7B-Instruct | 25.06 | 12.16 | 19.91 | 32.88 | 15.93 | 29.07 |
+| Mistral-Nemo-13B | 21.46 | 10.16 | 14.10 | 31.06 | 15.10 | 23.60 |
+| Mistral-Nemo-13B-Instruct | 20.84 | 10.37 | 16.47 | 32.52 | 16.05 | 26.02 |
+| Qwen2-7B | 26.09 | 12.26 | 20.54 | 31.01 | 15.31 | 23.15 |
+| Qwen2-7B-Instruct | 27.28 | 12.90 | 22.30 | 32.04 | 15.55 | 26.46 |
+| Qwen2-72B | 26.96 | 12.48 | 21.77 | 33.84 | 16.46 | 27.74 |
+| Qwen2-72B-Instruct | <ins>28.53</ins> | <ins>13.13</ins> | <ins>24.10</ins> | **35.64** | **17.58** | **31.26** |
 
-**Generative LLMs: Macro F1**
+**ICU**
 
-| Model | HOSP Zero-shot | HOSP CoT | HOSP 5-shot BM25 | ICU Zero-shot | ICU CoT | ICU 5-shot BM25 |
+| Model | Zero-shot Micro F1 | Zero-shot Macro F1 | Zero-shot MAP@20 | 5-shot BM25 Micro F1 | 5-shot BM25 Macro F1 | 5-shot BM25 MAP@20 |
 |:---|---:|---:|---:|---:|---:|---:|
-| Llama 3.1-8B | 11.06 | 9.68 | 17.22 | 11.20 | 9.76 | 13.20 |
-| Llama 3.1-8B-Instruct | 11.61 | 10.11 | 15.44 | 13.03 | 11.49 | 13.33 |
-| Llama 3.1-70B | 9.66 | 10.19 | 15.09 | 10.48 | 11.22 | 12.13 |
-| Llama 3.1-70B-Instruct | 11.33 | 10.59 | 15.81 | 12.55 | 12.08 | 14.47 |
-| Mistral-7B | 8.50 | 0.16 | 15.29 | 8.07 | 0.13 | 10.78 |
-| Mistral-7B-Instruct | 12.16 | 10.85 | 15.93 | 13.69 | 12.30 | **14.95** |
-| Mistral-Nemo-13B | 10.16 | 8.00 | 15.10 | 10.86 | 8.23 | 11.01 |
-| Mistral-Nemo-13B-Instruct | 10.37 | 9.57 | 16.05 | 11.58 | 10.78 | 11.37 |
-| Qwen2-7B | 12.26 | 12.04 | 15.31 | 13.11 | 12.55 | 11.35 |
-| Qwen2-7B-Instruct | 12.90 | 12.15 | 15.55 | 14.10 | 13.64 | 14.15 |
-| Qwen2-72B | 12.48 | 11.49 | 16.46 | 13.70 | 12.56 | 13.32 |
-| Qwen2-72B-Instruct | **13.13** | **12.74** | **17.58** | **14.42** | **14.12** | 14.77 |
+| *Encoders* | | | | | | |
+| BioMedBERT-110M | 47.33 | 17.11 | 48.25 | – | – | – |
+| GatorTronS-345M | **50.06** | **21.49** | **52.54** | – | – | – |
+| M2-BERT-80M | 38.54 | 8.14 | 33.65 | – | – | – |
+| *Generative LLMs* | | | | | | |
+| Llama 3.1-8B | 20.87 | 11.20 | 12.69 | 29.91 | 13.20 | 21.16 |
+| Llama 3.1-8B-Instruct | 25.81 | 13.03 | 16.49 | 29.27 | 13.33 | 19.75 |
+| Llama 3.1-70B | 19.69 | 10.48 | 13.22 | 28.64 | 12.13 | 20.08 |
+| Llama 3.1-70B-Instruct | 24.59 | 12.55 | 14.95 | 30.08 | 14.47 | 21.36 |
+| Mistral-7B | 13.99 | 8.07 | 7.68 | 26.07 | 10.78 | 17.21 |
+| Mistral-7B-Instruct | 26.55 | 13.69 | 18.36 | 31.08 | **14.95** | 24.09 |
+| Mistral-Nemo-13B | 20.22 | 10.86 | 12.25 | 26.18 | 11.01 | 17.66 |
+| Mistral-Nemo-13B-Instruct | 23.08 | 11.58 | 15.95 | 26.44 | 11.37 | 17.82 |
+| Qwen2-7B | 25.33 | 13.11 | 17.78 | 26.43 | 11.35 | 17.80 |
+| Qwen2-7B-Instruct | 27.73 | 14.10 | 20.11 | 30.22 | 14.15 | 21.98 |
+| Qwen2-72B | 26.84 | 13.70 | 18.46 | 30.07 | 13.32 | 21.96 |
+| Qwen2-72B-Instruct | <ins>29.50</ins> | <ins>14.42</ins> | <ins>21.29</ins> | **32.21** | 14.77 | **24.99** |
 
 ### Encoders at their own operating point
 

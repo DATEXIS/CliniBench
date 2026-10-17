@@ -199,9 +199,9 @@ def setting_label(row) -> str:
 
 UNITS = ("hosp", "icu")
 F1_COLUMNS = {"micro_f1": "Micro F1", "macro_f1": "Macro F1"}
-LLM_SETTINGS = {
-    "Zero-shot": lambda d: (d["shots"] == 0) & (d["prompting"] == "zero-shot"),
-    "CoT": lambda d: d["prompting"] == "zero-shot CoT",
+MAIN_METRICS = {"micro_f1": "Micro F1", "macro_f1": "Macro F1", "map@20": "MAP@20"}
+MAIN_SETTINGS = {
+    "Zero-shot": lambda d: (d["family"] == "encoder") | ((d["shots"] == 0) & (d["prompting"] == "zero-shot")),
     "5-shot BM25": lambda d: (d["shots"] == 5) & (d["retriever"] == "BM25"),
 }
 
@@ -233,21 +233,38 @@ def unit_mask(unit: str, extra=None):
     return lambda d: (d["unit"] == unit) & (extra(d) if extra else True)
 
 
+def unit_table(agg: pd.DataFrame, unit: str) -> str:
+    """Paper-style table for one care unit: encoders, then LLMs; zero-shot and 5-shot BM25.
+
+    Encoders (fine-tuned, top 20 by raw score) fill the zero-shot columns. Bold marks the
+    best value per column, underline the best generative LLM where it is not the best overall.
+    """
+    sub = agg[(agg["unit"] == unit) & (agg["budget"] == "top-20")
+              & ((agg["family"] == "generative") | (agg["prompting"] == "untuned"))]
+    columns = [(f"{setting} {name}", sub[mask(sub)].set_index("Model")[metric])
+               for setting, mask in MAIN_SETTINGS.items() for metric, name in MAIN_METRICS.items()]
+    gen_models = set(sub.loc[sub["family"] == "generative", "Model"])
+    lines = ["| Model | " + " | ".join(h for h, _ in columns) + " |",
+             "|:---|" + "---:|" * len(columns)]
+    for family, title in (("encoder", "Encoders"), ("generative", "Generative LLMs")):
+        lines.append(f"| *{title}* |" + " |" * len(columns))
+        for model in dict.fromkeys(sub.loc[sub["family"] == family, "Model"]):
+            cells = []
+            for _, values in columns:
+                v = values.get(model, float("nan"))
+                cell = "–" if v != v else f"{v:.2f}"
+                gen_best = values[values.index.isin(gen_models)].max()
+                if v == values.max():
+                    cell = f"**{cell}**"
+                elif model in gen_models and v == gen_best:
+                    cell = f"<ins>{cell}</ins>"
+                cells.append(cell)
+            lines.append(f"| {model} | " + " | ".join(cells) + " |")
+    return "\n".join(lines)
+
+
 def main_tables(agg: pd.DataFrame) -> str:
-    """Compact README comparison: micro and macro F1, HOSP and ICU side by side."""
-    enc = agg[(agg["family"] == "encoder") & (agg["prompting"] == "untuned")
-              & (agg["budget"] == "top-20")]
-    enc_specs = [(f"{u.upper()} {name}", unit_mask(u), m)
-                 for u in UNITS for m, name in F1_COLUMNS.items()]
-    parts = ["**Encoders** (fine-tuned, top 20 by score)\n\n"
-             + grid_markdown(enc, "Model", enc_specs, bold_best=True)]
-    gen = agg[agg["family"] == "generative"]
-    for metric, name in F1_COLUMNS.items():
-        specs = [(f"{u.upper()} {label}", unit_mask(u, mask), metric)
-                 for u in UNITS for label, mask in LLM_SETTINGS.items()]
-        parts.append(f"**Generative LLMs: {name}**\n\n"
-                     + grid_markdown(gen, "Model", specs, bold_best=True))
-    return "\n\n".join(parts)
+    return "\n\n".join(f"**{u.upper()}**\n\n" + unit_table(agg, u) for u in UNITS)
 
 
 def threshold_table(agg: pd.DataFrame) -> str:
