@@ -138,15 +138,20 @@ def partition_label_space(runs: list[dict]) -> set[str]:
 
 
 # ── tables ───────────────────────────────────────────────────────────────────
-COLUMNS = {"macro_recall": "Rec.", "macro_precision": "Prec.", "map@20": "MAP@20",
-           "md_acc": "MD Acc.", "macro_f1": "F1"}
+# Main comparison: F1 (micro and macro), ranking quality and main diagnosis.
+MAIN_COLUMNS = {"micro_f1": "Micro F1", "macro_f1": "Macro F1", "map@20": "MAP@20",
+                "md_acc": "MD Acc."}
+ALL_COLUMNS = {"micro_recall": "Micro Rec.", "micro_precision": "Micro Prec.",
+               "micro_f1": "Micro F1", "macro_recall": "Macro Rec.",
+               "macro_precision": "Macro Prec.", "macro_f1": "Macro F1",
+               "map@20": "MAP@20", "md_acc": "MD Acc."}
 
 
 def mean_over_icd(df: pd.DataFrame, keys: list[str]) -> pd.DataFrame:
     counts = df.groupby(keys)["icd"].nunique()
     if (counts != 2).any():
         raise AssertionError(f"missing ICD-9 or ICD-10 run for {counts[counts != 2].index.tolist()}")
-    return df.groupby(keys, sort=False)[list(COLUMNS)].mean().reset_index()
+    return df.groupby(keys, sort=False)[list(ALL_COLUMNS)].mean().reset_index()
 
 
 MODEL_NAMES = {
@@ -182,22 +187,24 @@ def setting_label(row) -> str:
 
 
 def main_tables(agg: pd.DataFrame) -> str:
-    """README tables: encoders, then LLMs zero-shot / zero-shot CoT / 5-shot BM25."""
+    """README main table per care unit: encoders, then LLMs zero-shot / CoT / 5-shot BM25."""
+    settings = [("zero-shot", lambda d: (d["shots"] == 0) & (d["prompting"] == "zero-shot")),
+                ("zero-shot CoT", lambda d: d["prompting"] == "zero-shot CoT"),
+                ("5-shot BM25", lambda d: (d["shots"] == 5) & (d["retriever"] == "BM25"))]
     parts = []
     for unit in ("hosp", "icu"):
         sub = agg[agg["unit"] == unit]
         enc = sub[sub["family"] == "encoder"].sort_values(
             ["order", "prompting"], ascending=[True, False]).copy()
-        enc["Model"] = enc["Model"] + enc["prompting"].map(
-            {"threshold-tuned": " (threshold-tuned)", "untuned": ""})
-        parts.append(f"**{unit.upper()}: encoders**\n\n" + to_markdown(enc, ["Model"]))
-        for title, mask in (
-                ("zero-shot", (sub["shots"] == 0) & (sub["prompting"] == "zero-shot")),
-                ("zero-shot CoT", sub["prompting"] == "zero-shot CoT"),
-                ("5-shot BM25", (sub["shots"] == 5) & (sub["retriever"] == "BM25"))):
-            gen = sub[(sub["family"] == "generative") & mask]
-            parts.append(f"**{unit.upper()}: generative LLMs, {title}**\n\n"
-                         + to_markdown(gen, ["Model"]))
+        enc["Setting"] = enc["prompting"]
+        blocks = [enc]
+        for title, mask in settings:
+            gen = sub[(sub["family"] == "generative") & mask(sub)].copy()
+            gen["Setting"] = title
+            blocks.append(gen)
+        table = pd.concat(blocks)
+        parts.append(f"**{unit.upper()}**\n\n" + to_markdown(table, ["Model", "Setting"],
+                                                               MAIN_COLUMNS))
     return "\n\n".join(parts)
 
 
@@ -211,7 +218,7 @@ def retriever_table(agg: pd.DataFrame, model: str = "Qwen2-72B-Instruct") -> str
         sub["order"] = sub["Retriever"].map((["Zero-shot"] + RETRIEVER_ORDER).index)
         sub = sub.sort_values(["order", "shots"]).rename(columns={"shots": "#FS"})
         parts.append(f"**{unit.upper()}: {MODEL_NAMES[model]}, few-shot retrievers**\n\n"
-                     + to_markdown(sub, ["Retriever", "#FS"]))
+                     + to_markdown(sub, ["Retriever", "#FS"], MAIN_COLUMNS))
     return "\n\n".join(parts)
 
 
@@ -222,14 +229,15 @@ def all_runs_table(agg: pd.DataFrame) -> str:
         sub["Setting"] = sub.apply(setting_label, axis=1)
         sub["r"] = sub["retriever"].map(lambda r: ([""] + RETRIEVER_ORDER).index(r))
         sub = sub.sort_values(["family", "order", "r", "shots", "prompting"])
-        parts.append(f"## {unit.upper()}\n\n" + to_markdown(sub, ["Model", "Setting"]))
+        parts.append(f"## {unit.upper()}\n\n" + to_markdown(sub, ["Model", "Setting"],
+                                                             ALL_COLUMNS))
     return "\n\n".join(parts)
 
 
-def to_markdown(df: pd.DataFrame, keys: list[str]) -> str:
-    out = df[keys + list(COLUMNS)].rename(columns=COLUMNS)
+def to_markdown(df: pd.DataFrame, keys: list[str], columns: dict[str, str]) -> str:
+    out = df[keys + list(columns)].rename(columns=columns)
     lines = ["| " + " | ".join(map(str, out.columns)) + " |",
-             "|" + "|".join([":---"] * len(keys) + ["---:"] * len(COLUMNS)) + "|"]
+             "|" + "|".join([":---"] * len(keys) + ["---:"] * len(columns)) + "|"]
     for _, row in out.iterrows():
         lines.append("| " + " | ".join(f"{v:.2f}" if isinstance(v, float) else str(v)
                                        for v in row) + " |")
@@ -258,8 +266,8 @@ def main() -> None:
         print(main_tables(agg) + "\n\n" + retriever_table(agg))
         args.all_runs_md.write_text(
             "# CliniBench: all runs (unified evaluation)\n\n"
-            "Macro-averaged over the shared label space, top-20 predictions, unweighted "
-            "mean of ICD-9 and ICD-10. Produced by `src/evaluation/evaluate_runs.py tables`; "
+            "Micro- and macro-averaged over the shared label space, top-20 predictions, "
+            "unweighted mean of ICD-9 and ICD-10. Produced by `src/evaluation/evaluate_runs.py tables`; "
             "per-partition values in `unified_metrics.csv`.\n\n" + all_runs_table(agg) + "\n")
 
 
