@@ -199,7 +199,9 @@ def setting_label(row) -> str:
 
 UNITS = ("hosp", "icu")
 F1_COLUMNS = {"micro_f1": "Micro F1", "macro_f1": "Macro F1"}
-MAIN_METRICS = {"micro_f1": "Micro F1", "macro_f1": "Macro F1", "map@20": "MAP@20"}
+# MAP@20 stays out of the main tables: AP never decreases when codes are appended, so it
+# favours the full 20-code encoder lists over the shorter de-duplicated LLM lists.
+MAIN_METRICS = {"micro_f1": "Micro F1", "macro_f1": "Macro F1"}
 MAIN_SETTINGS = {
     "Zero-shot": lambda d: (d["family"] == "encoder") | ((d["shots"] == 0) & (d["prompting"] == "zero-shot")),
     "5-shot BM25": lambda d: (d["shots"] == 5) & (d["retriever"] == "BM25"),
